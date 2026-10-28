@@ -13,10 +13,7 @@ class Group(nn.Module):
         super().__init__()
         self.n_tokens = n_tokens
         self.token_dim = dim // n_tokens
-
-        self.attn = nn.MultiheadAttention(
-            self.token_dim, n_heads, batch_first=True
-        )
+        self.attn = nn.MultiheadAttention(self.token_dim, n_heads, batch_first=True)
         self.ff = nn.Sequential(
             nn.Linear(dim, hidden),
             nn.GELU(),
@@ -63,8 +60,23 @@ class ReadinessEvaluator(nn.Module):
         return torch.sigmoid(self.head(state_with_budget)).squeeze(-1)
 
 
+class ValueNetwork(nn.Module):
+    def __init__(self, dim, hidden=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim + 1, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, state_with_budget):
+        return self.net(state_with_budget).squeeze(-1)
+
+
 class ARN(nn.Module):
-    def __init__(self, dim, hidden, n_groups, temperature=0.1):
+    def __init__(self, dim, hidden, n_groups, temperature=0.2):
         super().__init__()
         self.groups = nn.ModuleList([
             Group(dim, hidden, n_heads=4, n_tokens=8)
@@ -73,32 +85,33 @@ class ARN(nn.Module):
         self.router = Router(dim, n_groups)
         self.progress_eval = ProgressEvaluator(dim)
         self.readiness_eval = ReadinessEvaluator(dim)
+        self.value_net = ValueNetwork(dim, hidden=hidden)
         self.out = nn.Linear(dim, 1)
         self.temperature = temperature
+        self.n_groups = n_groups
 
     def forward(self, state, max_steps=MAX_STEPS, budget_init=1.0):
         best_state = state.clone()
         best_progress = torch.full((state.size(0),), -1e6)
-
         budget = torch.full((state.size(0),), budget_init)
         budget_per_step = budget_init / max_steps
 
         not_stopped = torch.ones(state.size(0))
-        halt_probs = []
-        states = []
-        traces = []
-        all_weights = []
+        halt_probs, states, traces, log_probs, entropies, values = [], [], [], [], [], []
 
         for step in range(max_steps):
             router_input = torch.cat([best_state, budget.unsqueeze(-1)], dim=-1)
             weights = self.router(router_input)
-            all_weights.append(weights)
+
+            dist = torch.distributions.Categorical(weights)
+            group_idx = dist.sample()
+            log_prob_group = dist.log_prob(group_idx)
+            entropy_group = dist.entropy()
 
             outs = torch.stack([g(best_state) for g in self.groups], dim=1)
-            candidate = (weights.unsqueeze(-1) * outs).sum(dim=1)
+            candidate = outs[torch.arange(state.size(0)), group_idx]
 
             cand_progress = self.progress_eval(candidate)
-
             alpha = torch.sigmoid(
                 (cand_progress - best_progress) / self.temperature
             ).unsqueeze(-1)
@@ -115,34 +128,32 @@ class ARN(nn.Module):
 
             halt_probs.append(halt_prob)
             states.append(best_state)
+            log_probs.append(log_prob_group)
+            entropies.append(entropy_group)
+
+            value_input = torch.cat([best_state, budget.unsqueeze(-1)], dim=-1)
+            value = self.value_net(value_input)
+            values.append(value)
 
             not_stopped = not_stopped * (1 - p_stop)
 
             traces.append({
-                "step": step,
-                "state": candidate.detach(),
-                "best_state": best_state.detach(),
-                "weights": weights.detach(),
-                "alpha": alpha.detach(),
-                "progress": cand_progress.detach(),
-                "p_stop": p_stop.detach(),
-                "halt_prob": halt_prob.detach(),
-                "not_stopped": not_stopped.detach(),
+                "step": step, "state": candidate.detach(),
+                "best_state": best_state.detach(), "weights": weights.detach(),
+                "group_idx": group_idx.detach(), "alpha": alpha.detach(),
+                "progress": cand_progress.detach(), "p_stop": p_stop.detach(),
+                "halt_prob": halt_prob.detach(), "not_stopped": not_stopped.detach(),
                 "budget": budget.detach(),
             })
-
             budget = budget - budget_per_step
-
-        weights_stack = torch.stack(all_weights, dim=0)
-        avg_weights = weights_stack.mean(dim=(0, 1))
-        n_groups = avg_weights.size(0)
-        target = torch.ones_like(avg_weights) / n_groups
-        balance_loss = F.mse_loss(avg_weights, target)
 
         halt_stack = torch.stack(halt_probs, dim=0)
         state_stack = torch.stack(states, dim=0)
-
         final_state = (halt_stack.unsqueeze(-1) * state_stack).sum(dim=0)
         pred = self.out(final_state)
 
-        return pred, traces, halt_stack, state_stack, balance_loss
+        log_probs_stack = torch.stack(log_probs, dim=0)
+        entropies_stack = torch.stack(entropies, dim=0)
+        values_stack = torch.stack(values, dim=0)
+
+        return pred, traces, halt_stack, state_stack, log_probs_stack, entropies_stack, values_stack
