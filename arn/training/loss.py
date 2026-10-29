@@ -1,8 +1,6 @@
 import torch
 import torch.nn.functional as F
 
-from arn.models.arn import ARN
-
 
 def arn_loss(model, pred, y, halt_stack, traces, state_stack, balance_loss,
              aux_weight=0.7, halt_weight=0.01, balance_weight=0.01,
@@ -12,7 +10,8 @@ def arn_loss(model, pred, y, halt_stack, traces, state_stack, balance_loss,
     per_step_loss = 0.0
     for k in range(state_stack.size(0)):
         step_pred = model.out(state_stack[k])
-        step_loss = F.mse_loss(step_pred, y, reduction="none").squeeze(-1)
+        # smooth_l1_loss устойчив к выбросам
+        step_loss = F.smooth_l1_loss(step_pred, y, reduction="none").squeeze(-1)
         per_step_loss = per_step_loss + halt_detached[k] * step_loss
     main_loss = per_step_loss.mean()
 
@@ -27,8 +26,15 @@ def arn_loss(model, pred, y, halt_stack, traces, state_stack, balance_loss,
     aux_loss = 0.0
     for t in traces:
         with torch.no_grad():
+            # Ограничиваем target, чтобы aux_loss не взрывался
             score_target = -F.mse_loss(model.out(t["state"]), y, reduction="none").squeeze(-1)
-        aux_loss = aux_loss + F.mse_loss(model.progress_eval(t["state"]), score_target)
+            score_target = torch.clamp(score_target, -1.0, 0.0)
+        
+        predicted = model.progress_eval(t["state"])
+        # Ограничиваем предсказание и используем smooth_l1
+        predicted = torch.clamp(predicted, -5.0, 5.0)
+        aux_loss = aux_loss + F.smooth_l1_loss(predicted, score_target, reduction="mean")
+    
     aux_loss = aux_loss / len(traces)
 
     steps_idx = torch.arange(steps, dtype=torch.float32).unsqueeze(1)

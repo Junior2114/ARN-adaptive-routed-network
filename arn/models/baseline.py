@@ -1,26 +1,27 @@
 import torch
 import torch.nn as nn
 
+
 class Baseline(nn.Module):
     def __init__(self, dim, hidden):
         super().__init__()
         self.net = nn.Sequential(
-			nn.Linear(dim, hidden),
-			nn.GELU(),
-			nn.Linear(hidden, hidden),
-			nn.GELU(),
-			nn.Linear(hidden, 1),
-		)
-        
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+
     def forward(self, x):
         return self.net(x)
-    
+
+
 class TransformerBaseline(nn.Module):
     def __init__(self, dim, hidden, n_heads=4, n_tokens=8, n_layers=2):
         super().__init__()
         self.n_tokens = n_tokens
         self.token_dim = dim // n_tokens
-
         self.layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
                 d_model=self.token_dim,

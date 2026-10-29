@@ -8,7 +8,7 @@ def diagnose(model, x, y=None):
     model.eval()
     with torch.no_grad():
         if isinstance(model, ARN):
-            _, trace, halt_stack, _, _, _, _ = model(x)
+            (_, trace, halt_stack, _, _, _, _, _) = model(x)
         else:
             return
 
@@ -54,7 +54,7 @@ def diagnose(model, x, y=None):
     print(f"Отклонение от равномерности: {avg_weights.std().item():.4f}")
 
     if y is not None:
-        print("\nПрямая оценка состояний (без Evaluator):")
+        print("\nПрямая оценка состояния (без Evaluator):")
         for s, t in enumerate(trace):
             state = t["state"]
             true_score = -F.mse_loss(model.out(state), y, reduction="none").squeeze(-1)
