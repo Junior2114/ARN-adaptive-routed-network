@@ -17,11 +17,10 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
                 gamma=0.95, lam=0.95, clip_eps=0.2, entropy_coef=0.03,
                 target_kl=0.05, max_grad_norm=0.5, weight_decay=1e-4,
                 log_every=20, save_path="checkpoints/model.pt",
-                load_path=None):
+                load_path=None, patience=20, min_delta=1e-5):
     x_train, y_train = train_data
     x_test, y_test = test_data
 
-    # Загрузка чекпоинта (если указан)
     start_epoch = 0
     if load_path and os.path.exists(load_path):
         print(f"Loading checkpoint from {load_path}...")
@@ -35,6 +34,27 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
     
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     start_time = time.time()
+
+    best_test = float("inf")
+    best_state_dict = None
+    early_stop_counter = 0
+
+    def check_early_stop(test_loss, epoch):
+        nonlocal best_test, best_state_dict, early_stop_counter
+        if test_loss < best_test - min_delta:
+            best_test = test_loss
+            best_state_dict = {k: v.clone() for k, v in model.state_dict().items()}
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
+        
+        if early_stop_counter >= patience:
+            print(f"\nEarly stopping triggered at epoch {epoch}. Best test: {best_test:.6f}")
+            if best_state_dict:
+                model.load_state_dict(best_state_dict)
+                print("Loaded best model weights.")
+            return True
+        return False
 
     if not isinstance(model, ARN):
         opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -50,21 +70,24 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
             with torch.no_grad():
                 pred_test = model(x_test)
                 test_loss = F.mse_loss(pred_test, y_test)
+            
             history["train"].append(loss.item())
             history["test"].append(test_loss.item())
             for key in ["aux", "halt", "balance", "steps", "policy", "value"]:
                 history[key].append(0.0)
             
+            if check_early_stop(test_loss.item(), epoch):
+                break
+
             epoch_time = time.time() - epoch_start
             total_time = time.time() - start_time
-            avg_time = total_time / (epoch - start_epoch + 1)
-            eta = avg_time * (epochs - epoch - 1)
+            eta = (total_time / (epoch - start_epoch + 1)) * (epochs - epoch - 1)
 
             if epoch % log_every == 0:
                 print(f"epoch={epoch:4d} train={loss.item():.4f} test={test_loss.item():.4f} "
                       f"| {epoch_time:.2f}s (ETA: {eta/60:.1f}m)")
-        
-        torch.save({"model_state_dict": model.state_dict(), "epoch": epochs}, save_path)
+
+        torch.save({"model_state_dict": model.state_dict(), "epoch": epoch}, save_path)
         print(f"\n[Baseline] Total time: {time.time() - start_time:.2f}s")
         print(f"Saved checkpoint to {save_path}")
         return history
@@ -103,16 +126,18 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
             history["policy"].append(0.0)
             history["value"].append(0.0)
 
+            if check_early_stop(test_loss.item(), epoch):
+                break
+
             epoch_time = time.time() - epoch_start
             total_time = time.time() - start_time
-            avg_time = total_time / (epoch - start_epoch + 1)
-            eta = avg_time * (epochs - epoch - 1)
+            eta = (total_time / (epoch - start_epoch + 1)) * (epochs - epoch - 1)
 
             if epoch % log_every == 0:
                 print(f"epoch={epoch:4d} sup={loss.item():.4f} aux={aux_loss.item():.4f} "
                       f"test={test_loss.item():.4f} | {epoch_time:.2f}s (ETA: {eta/60:.1f}m)")
 
-        torch.save({"model_state_dict": model.state_dict(), "epoch": epochs}, save_path)
+        torch.save({"model_state_dict": model.state_dict(), "epoch": epoch}, save_path)
         print(f"\n[Soft] Total time: {time.time() - start_time:.2f}s")
         print(f"Saved checkpoint to {save_path}")
         return history
@@ -216,10 +241,12 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
         history["policy"].append(policy_loss_val)
         history["value"].append(value_loss_val)
 
+        if check_early_stop(test_loss.item(), epoch):
+            break
+
         epoch_time = time.time() - epoch_start
         total_time = time.time() - start_time
-        avg_time = total_time / (epoch - start_epoch + 1)
-        eta = avg_time * (epochs - epoch - 1)
+        eta = (total_time / (epoch - start_epoch + 1)) * (epochs - epoch - 1)
 
         if epoch % log_every == 0:
             print(f"epoch={epoch:4d} sup={supervised_loss.item():.4f} "
@@ -227,7 +254,7 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
                   f"pol={policy_loss_val:.4f} steps={steps_val:.2f} "
                   f"test={test_loss.item():.4f} | {epoch_time:.2f}s (ETA: {eta/60:.1f}m)")
 
-    torch.save({"model_state_dict": model.state_dict(), "epoch": epochs}, save_path)
+    torch.save({"model_state_dict": model.state_dict(), "epoch": epoch}, save_path)
     print(f"\n[PPO] Total time: {time.time() - start_time:.2f}s")
     print(f"Saved checkpoint to {save_path}")
     return history

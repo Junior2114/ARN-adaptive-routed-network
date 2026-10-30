@@ -44,6 +44,10 @@ if __name__ == "__main__":
     parser.add_argument("--baseline_big_hidden", type=int, default=512)
     parser.add_argument("--trans_hidden", type=int, default=128)
     parser.add_argument("--trans_layers", type=int, default=2)
+    parser.add_argument("--patience", type=int, default=20,
+                        help="Early stopping patience")
+    parser.add_argument("--min_delta", type=float, default=1e-5,
+                        help="Minimum change to qualify as improvement")
     
     # Checkpoints
     parser.add_argument("--save_path", type=str, default="checkpoints/model.pt")
@@ -82,6 +86,8 @@ if __name__ == "__main__":
         halt_weight=args.halt_weight, balance_weight=args.balance_weight,
         cost_weight=args.cost_weight, prior_lambda=args.prior_lambda,
         gamma=args.gamma, weight_decay=args.weight_decay,
+        patience=args.patience,
+        min_delta=args.min_delta,
         save_path=args.save_path,
         load_path=args.load_path
     )
