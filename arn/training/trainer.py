@@ -1,4 +1,5 @@
 import time
+import os
 import torch
 import torch.nn.functional as F
 
@@ -15,18 +16,29 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
                 prior_lambda=0.2, ppo_epochs=3, ppo_warmup=20,
                 gamma=0.95, lam=0.95, clip_eps=0.2, entropy_coef=0.03,
                 target_kl=0.05, max_grad_norm=0.5, weight_decay=1e-4,
-                log_every=20):
+                log_every=20, save_path="checkpoints/model.pt",
+                load_path=None):
     x_train, y_train = train_data
     x_test, y_test = test_data
 
+    # Загрузка чекпоинта (если указан)
+    start_epoch = 0
+    if load_path and os.path.exists(load_path):
+        print(f"Loading checkpoint from {load_path}...")
+        checkpoint = torch.load(load_path, map_location="cpu")
+        model.load_state_dict(checkpoint["model_state_dict"])
+        start_epoch = checkpoint.get("epoch", 0)
+        print(f"Resumed from epoch {start_epoch}")
+
     history = {"train": [], "test": [], "aux": [], "halt": [],
                "balance": [], "steps": [], "policy": [], "value": []}
-
+    
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     start_time = time.time()
 
     if not isinstance(model, ARN):
         opt = torch.optim.Adam(model.parameters(), lr=lr)
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
             epoch_start = time.time()
             model.train()
             pred = model(x_train)
@@ -45,19 +57,22 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
             
             epoch_time = time.time() - epoch_start
             total_time = time.time() - start_time
-            avg_time = total_time / (epoch + 1)
+            avg_time = total_time / (epoch - start_epoch + 1)
             eta = avg_time * (epochs - epoch - 1)
 
             if epoch % log_every == 0:
                 print(f"epoch={epoch:4d} train={loss.item():.4f} test={test_loss.item():.4f} "
                       f"| {epoch_time:.2f}s (ETA: {eta/60:.1f}m)")
+        
+        torch.save({"model_state_dict": model.state_dict(), "epoch": epochs}, save_path)
         print(f"\n[Baseline] Total time: {time.time() - start_time:.2f}s")
+        print(f"Saved checkpoint to {save_path}")
         return history
 
     # Soft routing
     if model.routing_mode == "soft":
         opt = torch.optim.Adam(model.parameters(), lr=lr)
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
             epoch_start = time.time()
             model.train()
             (pred, traces, halt_stack, state_stack,
@@ -90,16 +105,19 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
 
             epoch_time = time.time() - epoch_start
             total_time = time.time() - start_time
-            avg_time = total_time / (epoch + 1)
+            avg_time = total_time / (epoch - start_epoch + 1)
             eta = avg_time * (epochs - epoch - 1)
 
             if epoch % log_every == 0:
                 print(f"epoch={epoch:4d} sup={loss.item():.4f} aux={aux_loss.item():.4f} "
                       f"test={test_loss.item():.4f} | {epoch_time:.2f}s (ETA: {eta/60:.1f}m)")
+
+        torch.save({"model_state_dict": model.state_dict(), "epoch": epochs}, save_path)
         print(f"\n[Soft] Total time: {time.time() - start_time:.2f}s")
+        print(f"Saved checkpoint to {save_path}")
         return history
 
-    # Discrete routing
+    # Discrete routing (PPO)
     opt_groups = torch.optim.Adam([
         {"params": list(model.groups.parameters()), "weight_decay": weight_decay},
         {"params": list(model.out.parameters())},
@@ -111,7 +129,7 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
     )
     opt_value = torch.optim.Adam(model.value_net.parameters(), lr=lr_value)
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         epoch_start = time.time()
         model.train()
 
@@ -200,7 +218,7 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
 
         epoch_time = time.time() - epoch_start
         total_time = time.time() - start_time
-        avg_time = total_time / (epoch + 1)
+        avg_time = total_time / (epoch - start_epoch + 1)
         eta = avg_time * (epochs - epoch - 1)
 
         if epoch % log_every == 0:
@@ -209,5 +227,7 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
                   f"pol={policy_loss_val:.4f} steps={steps_val:.2f} "
                   f"test={test_loss.item():.4f} | {epoch_time:.2f}s (ETA: {eta/60:.1f}m)")
 
+    torch.save({"model_state_dict": model.state_dict(), "epoch": epochs}, save_path)
     print(f"\n[PPO] Total time: {time.time() - start_time:.2f}s")
+    print(f"Saved checkpoint to {save_path}")
     return history
