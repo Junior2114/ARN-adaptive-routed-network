@@ -36,6 +36,8 @@ if __name__ == "__main__":
     parser.add_argument("--limit_chars", type=int, default=None)
     parser.add_argument("--data_path", type=str, default="text/data/shakespeare.txt")
     parser.add_argument("--save_path", type=str, default="checkpoints/arn-text.pt")
+    parser.add_argument("--load_path", type=str, default=None,
+                        help="Путь к чекпоинту для дообучения")
     args = parser.parse_args()
 
     torch.manual_seed(0)
@@ -69,6 +71,13 @@ if __name__ == "__main__":
         n_layers=cfg.n_layers,
     ).to(device)
     print(f"params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
+    # Загрузка чекпоинта (если указан)
+    if args.load_path and os.path.exists(args.load_path):
+        print(f"Loading checkpoint from {args.load_path}...")
+        checkpoint = torch.load(args.load_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print("Checkpoint loaded. Resuming training...")
 
     hist = train_text_model(
         model,
