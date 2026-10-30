@@ -4,6 +4,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+import torch.nn.functional as F
 
 from arn.models.arn import ARN
 from arn.training.trainer import train_model
@@ -40,19 +41,10 @@ if __name__ == "__main__":
     parser.add_argument("--prior_lambda", type=float, default=0.2)
     parser.add_argument("--gamma", type=float, default=0.95)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--baseline_small_hidden", type=int, default=64)
-    parser.add_argument("--baseline_big_hidden", type=int, default=512)
-    parser.add_argument("--trans_hidden", type=int, default=128)
-    parser.add_argument("--trans_layers", type=int, default=2)
-    parser.add_argument("--patience", type=int, default=20,
-                        help="Early stopping patience")
-    parser.add_argument("--min_delta", type=float, default=1e-5,
-                        help="Minimum change to qualify as improvement")
-    
-    # Checkpoints
+    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--min_delta", type=float, default=1e-5)
     parser.add_argument("--save_path", type=str, default="checkpoints/model.pt")
     parser.add_argument("--load_path", type=str, default=None)
-
     args = parser.parse_args()
 
     torch.manual_seed(0)
@@ -62,23 +54,41 @@ if __name__ == "__main__":
 
     print(f"task: {args.task} (train={args.train_size}, test={args.test_size}, router={args.router})")
 
-    # Обучаем Baseline'ы (без сохранения)
-    print("=== Baseline (small) ===")
-    baseline_small = Baseline(64, args.baseline_small_hidden)
-    train_model(baseline_small, (x_train, y_train), (x_test, y_test), epochs=args.epochs, lr=args.lr, save_path="checkpoints/tmp.pt")
+    # Baseline'ы — только если не epochs=0
+    if args.epochs > 0:
+        print("=== Baseline (small) ===")
+        baseline_small = Baseline(64, 64)
+        train_model(baseline_small, (x_train, y_train), (x_test, y_test),
+                    epochs=args.epochs, lr=args.lr, save_path="checkpoints/tmp.pt",
+                    patience=args.patience, min_delta=args.min_delta)
 
-    print("=== Baseline (big) ===")
-    baseline_big = Baseline(64, args.baseline_big_hidden)
-    train_model(baseline_big, (x_train, y_train), (x_test, y_test), epochs=args.epochs, lr=args.lr, save_path="checkpoints/tmp.pt")
+        print("=== Baseline (big) ===")
+        baseline_big = Baseline(64, 512)
+        train_model(baseline_big, (x_train, y_train), (x_test, y_test),
+                    epochs=args.epochs, lr=args.lr, save_path="checkpoints/tmp.pt",
+                    patience=args.patience, min_delta=args.min_delta)
 
-    print("=== Transformer ===")
-    trans_baseline = TransformerBaseline(64, args.trans_hidden, n_heads=4, n_tokens=8, n_layers=args.trans_layers)
-    train_model(trans_baseline, (x_train, y_train), (x_test, y_test), epochs=args.epochs, lr=args.lr, save_path="checkpoints/tmp.pt")
+        print("=== Transformer ===")
+        trans_baseline = TransformerBaseline(64, 128, n_heads=4, n_tokens=8, n_layers=2)
+        train_model(trans_baseline, (x_train, y_train), (x_test, y_test),
+                    epochs=args.epochs, lr=args.lr, save_path="checkpoints/tmp.pt",
+                    patience=args.patience, min_delta=args.min_delta)
 
-    # Обучаем ARN (с сохранением / загрузкой)
     print("=== ARN ===")
     arn = ARN(64, 128, 4, routing_mode=args.router)
-    
+
+    if args.epochs == 0 and args.load_path:
+        # Только загрузка и оценка
+        checkpoint = torch.load(args.load_path, map_location="cpu")
+        arn.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Loaded from {args.load_path} (epoch {checkpoint.get('epoch', '?')})")
+        arn.eval()
+        with torch.no_grad():
+            pred_test, _, _, _, _, _, _, _ = arn(x_test)
+            test_loss = F.mse_loss(pred_test, y_test)
+        print(f"\n=== Evaluated test loss: {test_loss.item():.6f} ===")
+        sys.exit(0)
+
     hist_arn = train_model(
         arn, (x_train, y_train), (x_test, y_test),
         epochs=args.epochs, lr=args.lr, lr_router=args.lr_router,
@@ -86,13 +96,14 @@ if __name__ == "__main__":
         halt_weight=args.halt_weight, balance_weight=args.balance_weight,
         cost_weight=args.cost_weight, prior_lambda=args.prior_lambda,
         gamma=args.gamma, weight_decay=args.weight_decay,
-        patience=args.patience,
-        min_delta=args.min_delta,
-        save_path=args.save_path,
-        load_path=args.load_path
+        patience=args.patience, min_delta=args.min_delta,
+        save_path=args.save_path, load_path=args.load_path,
     )
 
     print("=== Итог ===")
-    print(f"ARN: {hist_arn['test'][-1]:.6f}")
+    if hist_arn["test"]:
+        print(f"ARN (last): {hist_arn['test'][-1]:.6f}")
+        print(f"ARN (best): {min(hist_arn['test']):.6f}")
+
     print("=== Диагностика ARN ===")
     diagnose(arn, x_test, y_test)

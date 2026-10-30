@@ -10,7 +10,7 @@
 
 | Task | Baseline (big) | Transformer | ARN (best mode) |
 |---|---|---|---|
-| mixed | 0.001353 | 0.001375 | **0.000327** (Discrete/PPO, 300 epochs) |
+| mixed | 0.001353 | 0.001375 | **0.000308** (Discrete/PPO, early stop at 176) |
 | conditional2 | 0.005400 | 0.006500 | **0.003036** (Soft, 300 epochs) |
 
 **Key takeaways:**
