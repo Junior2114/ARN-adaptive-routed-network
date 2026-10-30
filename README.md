@@ -6,14 +6,12 @@
 
 **ARN** is a neural architecture with adaptive computation depth and dynamic routing. It decides how many processing steps to take and which computational blocks to use, based on the input's complexity. It combines attention-based groups, soft rollback, PonderNet-style halt loss, and a budget mechanism with two routing modes: **Soft** (for composition tasks) and **Discrete/PPO** (for selection tasks).
 
-## 📊 Results
+## Results
 
-Experiments were run with `train_size=2000`, `test_size=400`, `epochs=200`, `seed=0`. Lower loss is better.
-
-| Task | Description | Baseline (big) | Transformer | **ARN** | Routing Mode |
-|---|---|---|---|---|---|
-| `mixed` | `a+b` or `a*b` | 0.001353 | 0.001375 | **0.000386** | Discrete (PPO) |
-| `conditional2` | `(a*b if a>b else a+b) + (c*d if c>d else c+d)` | 0.006897 | 0.008021 | **0.003121** | Soft |
+| Task | Baseline (big) | Transformer | ARN (best mode) |
+|---|---|---|---|
+| mixed | 0.001353 | 0.001375 | **0.000327** (Discrete/PPO, 300 epochs) |
+| conditional2 | 0.005400 | 0.006500 | **0.003036** (Soft, 300 epochs) |
 
 **Key takeaways:**
 - ARN outperforms baselines by **2.5–3.5×** on both tasks.
