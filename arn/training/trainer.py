@@ -10,6 +10,19 @@ from arn.training.ppo import (
 )
 
 
+def _safe_model_call(model, x, is_arn):
+    """Безопасный вызов модели: если вернулся кортеж, берем первый элемент."""
+    out = model(x)
+    if is_arn:
+        if isinstance(out, tuple):
+            return out
+        return (out, [], None, None, None, None, None, None)
+    else:
+        if isinstance(out, tuple):
+            return out[0]
+        return out
+
+
 def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
                 lr_router=1e-4, lr_value=1e-3, aux_weight=0.7,
                 halt_weight=0.01, balance_weight=0.01, cost_weight=0.0005,
@@ -25,9 +38,14 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
     if load_path and os.path.exists(load_path):
         print(f"Loading checkpoint from {load_path}...")
         checkpoint = torch.load(load_path, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state_dict"])
+        state_dict = checkpoint["model_state_dict"]
+        # Убираем префиксы, только если модель НЕ скомпилирована
+        if not hasattr(model, "_orig_mod"):
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         start_epoch = checkpoint.get("epoch", 0)
         print(f"Resumed from epoch {start_epoch}")
+
 
     history = {"train": [], "test": [], "aux": [], "halt": [],
                "balance": [], "steps": [], "policy": [], "value": []}
@@ -40,10 +58,12 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
     early_stop_counter = 0
     last_epoch = start_epoch
 
+    # Внутри функции check_early_stop:
     def check_early_stop(test_loss, epoch):
         nonlocal best_test, best_state_dict, early_stop_counter
         if test_loss < best_test - min_delta:
             best_test = test_loss
+            # Сохраняем state_dict как есть (с _orig_mod., если модель скомпилирована)
             best_state_dict = {k: v.clone() for k, v in model.state_dict().items()}
             early_stop_counter = 0
         else:
@@ -52,31 +72,36 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
         if early_stop_counter >= patience:
             print(f"\nEarly stopping triggered at epoch {epoch}. Best test: {best_test:.6f}")
             if best_state_dict:
+                # Загружаем как есть (ключи совпадут)
                 model.load_state_dict(best_state_dict)
                 print("Loaded best model weights.")
             return True
         return False
 
-    # Если epochs=0, просто сохраняем и выходим
     if epochs == 0:
         torch.save({"model_state_dict": model.state_dict(), "epoch": start_epoch}, save_path)
         print(f"Saved checkpoint to {save_path} (no training)")
         return history
 
+    # ===== BASELINE =====
     if not isinstance(model, ARN):
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         for epoch in range(start_epoch, epochs):
             last_epoch = epoch
             epoch_start = time.time()
             model.train()
-            pred = model(x_train)
+            
+            # Безопасный вызов для Baseline
+            pred = _safe_model_call(model, x_train, is_arn=False)
+            
             loss = F.mse_loss(pred, y_train)
             opt.zero_grad()
             loss.backward()
             opt.step()
+            
             model.eval()
             with torch.no_grad():
-                pred_test = model(x_test)
+                pred_test = _safe_model_call(model, x_test, is_arn=False)
                 test_loss = F.mse_loss(pred_test, y_test)
             
             history["train"].append(loss.item())
@@ -100,15 +125,18 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
         print(f"Saved checkpoint to {save_path}")
         return history
 
-    # Soft routing
+    # ===== SOFT ROUTING =====
     if model.routing_mode == "soft":
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         for epoch in range(start_epoch, epochs):
             last_epoch = epoch
             epoch_start = time.time()
             model.train()
+            
+            out = _safe_model_call(model, x_train, is_arn=True)
             (pred, traces, halt_stack, state_stack,
-             _, _, _, balance_loss) = model(x_train)
+             _, _, _, balance_loss) = out
+
             (loss, main_loss, aux_loss, halt_loss,
              balance_loss, expected_steps) = arn_loss(
                 model, pred, y_train, halt_stack, traces, state_stack, balance_loss,
@@ -122,7 +150,8 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
 
             model.eval()
             with torch.no_grad():
-                pred_test, _, halt_stack_test, _, _, _, _, _ = model(x_test)
+                out_test = _safe_model_call(model, x_test, is_arn=True)
+                pred_test, _, halt_stack_test, _, _, _, _, _ = out_test
                 test_loss = F.mse_loss(pred_test, y_test)
                 steps_val = (torch.arange(halt_stack_test.size(0)).float().unsqueeze(1) * halt_stack_test).sum(dim=0).mean().item()
 
@@ -151,7 +180,7 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
         print(f"Saved checkpoint to {save_path}")
         return history
 
-    # Discrete routing (PPO)
+    # ===== DISCRETE ROUTING (PPO) =====
     opt_groups = torch.optim.Adam([
         {"params": list(model.groups.parameters()), "weight_decay": weight_decay},
         {"params": list(model.out.parameters())},
@@ -168,8 +197,9 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
         epoch_start = time.time()
         model.train()
 
+        out = _safe_model_call(model, x_train, is_arn=True)
         (pred, traces, halt_stack, state_stack,
-         log_probs, entropies, values, balance_loss) = model(x_train)
+         log_probs, entropies, values, balance_loss) = out
 
         (supervised_loss, main_loss, aux_loss, halt_loss,
          balance_loss, expected_steps) = arn_loss(
@@ -220,8 +250,10 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
             value_loss_val = value_loss.item()
 
             for _ in range(ppo_epochs):
-                (pred, traces, halt_stack, state_stack,
-                 log_probs_new, entropies_new, values_new, _) = model(x_train)
+                out_new = _safe_model_call(model, x_train, is_arn=True)
+                (pred_new, traces_new, halt_stack_new, state_stack_new,
+                 log_probs_new, entropies_new, values_new, _) = out_new
+                
                 policy_loss = ppo_loss(log_probs_new, log_probs.detach(),
                                        advantages, entropies_new,
                                        clip_eps, entropy_coef)
@@ -238,7 +270,8 @@ def train_model(model, train_data, test_data, epochs=200, lr=1e-3,
 
         model.eval()
         with torch.no_grad():
-            pred_test, _, halt_stack_test, _, _, _, _, _ = model(x_test)
+            out_test = _safe_model_call(model, x_test, is_arn=True)
+            pred_test, _, halt_stack_test, _, _, _, _, _ = out_test
             test_loss = F.mse_loss(pred_test, y_test)
             steps_val = (torch.arange(halt_stack_test.size(0)).float().unsqueeze(1) * halt_stack_test).sum(dim=0).mean().item()
 
