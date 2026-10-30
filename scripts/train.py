@@ -45,6 +45,10 @@ if __name__ == "__main__":
     parser.add_argument("--min_delta", type=float, default=1e-5)
     parser.add_argument("--save_path", type=str, default="checkpoints/model.pt")
     parser.add_argument("--load_path", type=str, default=None)
+    
+    # Возвращаем --compile
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile for speedup")
+
     args = parser.parse_args()
 
     torch.manual_seed(0)
@@ -54,7 +58,6 @@ if __name__ == "__main__":
 
     print(f"task: {args.task} (train={args.train_size}, test={args.test_size}, router={args.router})")
 
-    # Baseline'ы — только если не epochs=0
     if args.epochs > 0:
         print("=== Baseline (small) ===")
         baseline_small = Baseline(64, 64)
@@ -77,10 +80,23 @@ if __name__ == "__main__":
     print("=== ARN ===")
     arn = ARN(64, 128, 4, routing_mode=args.router)
 
+    # 3-й способ: torch.compile (с защитой)
+    if args.compile and hasattr(torch, "compile"):
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        try:
+            arn = torch.compile(arn)
+            print("torch.compile enabled")
+        except Exception as e:
+            print(f"torch.compile failed: {e}")
+
     if args.epochs == 0 and args.load_path:
-        # Только загрузка и оценка
         checkpoint = torch.load(args.load_path, map_location="cpu")
-        arn.load_state_dict(checkpoint["model_state_dict"])
+        # Если модель скомпилирована, веса могут иметь префикс "_orig_mod."
+        state_dict = checkpoint["model_state_dict"]
+        if args.compile:
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        arn.load_state_dict(state_dict)
         print(f"Loaded from {args.load_path} (epoch {checkpoint.get('epoch', '?')})")
         arn.eval()
         with torch.no_grad():
